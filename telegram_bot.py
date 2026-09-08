@@ -37,6 +37,15 @@ class NewsBot:
         self._resolved_sources = {}
         self._handlers_set = False
 
+        # ثبت کانال‌های اولیه از config توی دیتابیس
+        self._init_source_channels()
+
+    def _init_source_channels(self):
+        """کانال‌های SOURCE_CHANNELS رو توی دیتابیس ثبت کن"""
+        for ch in SOURCE_CHANNELS:
+            self.db.add_source_channel(ch, ch)
+        print("[INIT] Registered " + str(len(SOURCE_CHANNELS)) + " source channels from config")
+
     def _format_message(self, title, body, hashtags):
         lines = []
         lines.append("<b>" + self._escape_html(title) + "</b>")
@@ -224,7 +233,7 @@ class NewsBot:
             chat_name = getattr(event.chat, 'username', str(event.chat_id)) or str(event.chat_id)
             print("[Event] Channel msg from: " + chat_name + " chat_id=" + str(event.chat_id))
             if not self._is_source_channel(event):
-                print("[Event] SKIP " + str(event.chat_id) + " not in source list. Resolved: " + str(list(self._resolved_sources.keys())))
+                print("[Event] SKIP " + str(event.chat_id) + " not in source list")
                 return
             print("[Event] MATCH! Processing...")
             msg = event.message
@@ -232,10 +241,6 @@ class NewsBot:
                 await self._handle_album(msg)
                 return
             await self._process_message(msg)
-
-        @self.client.on(events.Disconnected)
-        async def disconnect_handler(event):
-            print("[Telethon] DISCONNECTED!")
 
         print("[Handlers] Setup complete.")
 

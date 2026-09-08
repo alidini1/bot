@@ -1,5 +1,5 @@
 """
-کلاینت Gemini با requests (سبک، بدون grpcio/pydantic)
+کلاینت Gemini با requests
 """
 import time
 import requests
@@ -13,18 +13,22 @@ class GeminiClient:
         self.current_key_index = 0
         self.model = model
         self.base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        print(f"[Gemini] Loaded {len(api_keys)} key(s), model: {model}")
+
+    def _current_key(self):
+        return self.api_keys[self.current_key_index]
 
     def _next_key(self):
+        old_idx = self.current_key_index
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-        print(f"[Gemini] Switched to key #{self.current_key_index + 1}")
+        print(f"[Gemini] Key {old_idx+1} exhausted, switching to key {self.current_key_index+1}/{len(self.api_keys)}")
 
-    def _call_api(self, prompt):
-        key = self.api_keys[self.current_key_index]
+    def _call_api(self, prompt, key):
         url = f"{self.base_url}?key={key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "temperature": 0.6,
+                "temperature": 0.7,
                 "maxOutputTokens": 2048,
             }
         }
@@ -45,22 +49,24 @@ class GeminiClient:
     def rewrite_and_hashtag(self, text, retries_per_key=2):
         prompt = f"""شما یک ویراستار خبر حرفه‌ای و کاملاً بی‌طرف هستید.
 
-قوانین سختگیرانه:
+قوانین:
 1. متن را به صورت خبری رسمی، روان و جذاب بازنویسی کنید
 2. هرگز از هیچ حکومت، دولت یا گروه سیاسی خاصی تعریف نکنید
 3. اگر خبر مربوط به جمهوری اسلامی یا مقامات آن بود، صرفاً واقعیت را بدون جانبداری بنویسید
 4. ۳ تا ۵ هشتگ مرتبط به فارسی در انتهای متن اضافه کنید
-5. اگر خبر مربوط به یک کشور خاص بود (مثلاً ایران، آمریکا، اسرائیل، چین، روسیه و...)، حتماً پرچم ایموجی آن کشور (مثلاً 🇮🇷 🇺🇸 🇮🇱 🇨🇳 🇷🇺) را در ابتدای عنوان خبر قرار دهید
+5. اگر خبر مربوط به یک کشور خاص بود، پرچم ایموجی آن کشور را در ابتدای عنوان خبر قرار دهید
 6. از ایموجی در صورت نیاز و به‌جا استفاده کنید
-7. فقط متن نهایی را برگردانید
-8. خروجی را در قالب زیر بدهید (دقیقاً با همین تگ‌ها):
+7. اگر فردی حرفی زده، آن را به صورت نقل قول مستقیم با «» بنویسید
+8. هیچ توضیح اضافی ندهید — مستقیم سر اصل مطلب بروید
+9. فقط متن نهایی را برگردانید
+10. خروجی را در قالب زیر بدهید:
 
 <TITLE>
-عنوان خبر (یک جمله کوتاه و گیرا)
+عنوان خبر
 </TITLE>
 
 <BODY>
-متن اصلی خبر بازنویسی‌شده
+متن اصلی خبر
 </BODY>
 
 <HASHTAGS>
@@ -71,16 +77,26 @@ class GeminiClient:
 {text}
 """
         max_attempts = retries_per_key * len(self.api_keys)
+        key_attempts = {i: 0 for i in range(len(self.api_keys))}
 
         for attempt in range(max_attempts):
+            key = self._current_key()
+            key_idx = self.current_key_index
             try:
-                result = self._call_api(prompt)
+                result = self._call_api(prompt, key)
                 if result:
                     return result
             except requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response else 0
-                print(f"[Gemini] HTTP {status}: {e}")
-                if status in (429, 400, 401, 403):
+                if status == 429:
+                    key_attempts[key_idx] += 1
+                    if key_attempts[key_idx] >= retries_per_key:
+                        self._next_key()
+                        time.sleep(2)
+                    else:
+                        time.sleep(1)
+                elif status in (400, 401, 403):
+                    print(f"[Gemini] Key {key_idx+1} invalid ({status}), switching...")
                     self._next_key()
                     time.sleep(1)
                 else:
@@ -89,5 +105,5 @@ class GeminiClient:
                 print(f"[Gemini] Error: {e}")
                 time.sleep(2)
 
-        print("[Gemini] All keys failed!")
+        print("[Gemini] All keys failed or rate-limited!")
         return None

@@ -14,8 +14,12 @@ _raw_sources = os.getenv("SOURCE_CHANNELS", "")
 SOURCE_CHANNELS = [s.strip() for s in _raw_sources.split(",") if s.strip()]
 
 # Gemini keys — support comma OR newline separated
-_raw_keys = os.getenv("GEMINI_API_KEYS", "")
-GEMINI_API_KEYS = [k.strip() for k in _raw_keys.replace("\n", ",").split(",") if k.strip()]
+#_raw_keys = os.getenv("GEMINI_API_KEYS", "")
+GEMINI_API_KEYS =[ "AQ.Ab8RN6KPiDYS3mJ-38Dxp0rswktL9-UoGEpjsYha4rzfDBdESg",
+    "AQ.Ab8RN6IpXydlIjcdN7f4L7oVvXYpnG5TO1TBdYxdlZFvL1qPWw",
+    "AQ.Ab8RN6JuouR_WIVm6VPblQALUJ612y4bHrmjEvUmANJMk29pHg",
+    "AQ.Ab8RN6JCLHtWre-hVZpesTziVWlJoKpZ7yyxJlsR-86o6uiJ7g",
+    ]
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 

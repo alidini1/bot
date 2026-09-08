@@ -1,5 +1,5 @@
 """
-هسته اصلی ربات تلگرام — Event-driven + HTML Formatting
+هسته اصلی ربات تلگرام — Event-driven + Railway Compatible
 """
 import asyncio
 import random
@@ -21,11 +21,10 @@ class NewsBot:
     def __init__(self):
         if SESSION_STRING:
             session = StringSession(SESSION_STRING)
-            print("🔑 Using Session String")
+            print("[INIT] Using Session String")
         else:
-            from telethon.sessions import SQLiteSession
             session = SESSION_NAME
-            print("📁 Using Session File")
+            print("[INIT] Using Session File: " + str(session))
 
         self.client = TelegramClient(session, API_ID, API_HASH)
         self.db = Database()
@@ -36,8 +35,7 @@ class NewsBot:
         self._pending_albums = {}
         self._album_timers = {}
         self._resolved_sources = {}
-
-        self._setup_handlers()
+        self._handlers_set = False
 
     def _format_message(self, title, body, hashtags):
         lines = []
@@ -80,11 +78,13 @@ class NewsBot:
     async def _resolve_source_channels(self):
         channels = self.db.get_source_channels()
         self._resolved_sources = {}
+        print("[Resolve] Found " + str(len(channels)) + " channels in DB")
         for cid, cname in channels:
             try:
                 int_id = int(cid)
                 marked = get_peer_id(PeerChannel(int_id))
                 self._resolved_sources[cid] = {"bare": int_id, "marked": marked, "username": ""}
+                print("[Resolve] OK numeric " + cname + " marked=" + str(marked))
             except ValueError:
                 try:
                     entity = await self.client.get_entity(cid)
@@ -94,8 +94,10 @@ class NewsBot:
                     self._resolved_sources[cid] = {"bare": bare_id, "marked": marked, "username": username}
                     self.db.remove_source_channel(cid)
                     self.db.add_source_channel(str(bare_id), cname)
-                except Exception:
-                    pass
+                    print("[Resolve] OK username " + cname + " @" + username + " marked=" + str(marked))
+                except Exception as e:
+                    print("[Resolve] FAIL " + cid + ": " + str(e))
+        print("[Resolve] Total resolved: " + str(len(self._resolved_sources)))
 
     def _is_source_channel(self, event):
         chat_id = event.chat_id
@@ -114,6 +116,10 @@ class NewsBot:
         return False
 
     def _setup_handlers(self):
+        if self._handlers_set:
+            return
+        self._handlers_set = True
+        print("[Handlers] Setting up...")
 
         @self.client.on(events.NewMessage(pattern=r"/start"))
         async def start_handler(event):
@@ -215,100 +221,102 @@ class NewsBot:
         async def source_handler(event):
             if not event.is_channel:
                 return
+            chat_name = getattr(event.chat, 'username', str(event.chat_id)) or str(event.chat_id)
+            print("[Event] Channel msg from: " + chat_name + " chat_id=" + str(event.chat_id))
             if not self._is_source_channel(event):
+                print("[Event] SKIP " + str(event.chat_id) + " not in source list. Resolved: " + str(list(self._resolved_sources.keys())))
                 return
-
+            print("[Event] MATCH! Processing...")
             msg = event.message
-
             if msg.grouped_id:
                 await self._handle_album(msg)
                 return
-
             await self._process_message(msg)
+
+        @self.client.on(events.Disconnected)
+        async def disconnect_handler(event):
+            print("[Telethon] DISCONNECTED!")
+
+        print("[Handlers] Setup complete.")
 
     async def _handle_album(self, msg):
         gid = msg.grouped_id
         if gid not in self._pending_albums:
             self._pending_albums[gid] = []
-
             async def process_album_after_delay():
                 await asyncio.sleep(3)
                 album = self._pending_albums.pop(gid, [])
                 if album:
                     await self._process_album(album)
                 self._album_timers.pop(gid, None)
-
             task = asyncio.create_task(process_album_after_delay())
             self._album_timers[gid] = task
-
         self._pending_albums[gid].append(msg)
 
     async def _process_message(self, msg):
         try:
             text = msg.message or ""
             clean_text = self.cleaner.clean(text)
-
+            print("[Process] Clean text: " + clean_text[:80])
             if not clean_text and not msg.media:
+                print("[Process] Empty, skip")
                 return
-
             is_dup, reason = self.duplicate.is_duplicate(clean_text or "")
             if is_dup:
+                print("[Process] Duplicate blocked: " + reason)
                 self.db.increment_stat("duplicates_blocked")
                 return
-
             if FILTER_KEYWORDS and clean_text:
                 if not any(kw in clean_text for kw in FILTER_KEYWORDS):
+                    print("[Process] Filtered by keywords")
                     return
-
+            print("[Process] Calling Gemini...")
             gemini_raw = self.gemini.rewrite_and_hashtag(clean_text)
-
             if gemini_raw:
+                print("[Process] Gemini OK")
                 title, body, hashtags = self._parse_gemini_output(gemini_raw)
                 self.db.increment_stat("gemini_success")
             else:
+                print("[Process] Gemini FAIL, using fallback")
                 title = ""
                 body = clean_text
                 hashtags = ""
                 self.db.increment_stat("gemini_failed")
-
             if not title and body:
                 lines = body.split("\n")
                 title = lines[0][:100]
                 body = "\n".join(lines[1:]) if len(lines) > 1 else ""
-
             final_html = self._format_message(title, body, hashtags)
+            print("[Process] Sending to " + TARGET_CHANNEL)
             target = await self.client.get_entity(TARGET_CHANNEL)
-
             if msg.media:
                 await self.client.send_file(target, msg.media, caption=final_html, parse_mode="html")
             else:
                 await self.client.send_message(target, final_html, parse_mode="html")
-
             self.db.increment_stat("total_processed")
             if clean_text:
                 self.duplicate.add_message(clean_text, msg.chat_id)
-
+            print("[Process] SENT!")
             await asyncio.sleep(random.randint(RANDOM_DELAY_MIN, RANDOM_DELAY_MAX))
-
         except FloodWaitError as e:
+            print("[Process] FloodWait: " + str(e.seconds))
             await asyncio.sleep(e.seconds)
-        except Exception:
-            pass
+        except Exception as e:
+            print("[Process] ERROR: " + str(e))
+            import traceback
+            traceback.print_exc()
 
     async def _process_album(self, album_msgs):
         try:
             text = album_msgs[0].message or ""
             clean_text = self.cleaner.clean(text)
-
             is_dup, reason = self.duplicate.is_duplicate(clean_text or "")
             if is_dup:
                 self.db.increment_stat("duplicates_blocked")
                 return
-
             if FILTER_KEYWORDS and clean_text:
                 if not any(kw in clean_text for kw in FILTER_KEYWORDS):
                     return
-
             gemini_raw = self.gemini.rewrite_and_hashtag(clean_text)
             if gemini_raw:
                 title, body, hashtags = self._parse_gemini_output(gemini_raw)
@@ -318,41 +326,58 @@ class NewsBot:
                 body = clean_text
                 hashtags = ""
                 self.db.increment_stat("gemini_failed")
-
             if not title and body:
                 lines = body.split("\n")
                 title = lines[0][:100]
                 body = "\n".join(lines[1:]) if len(lines) > 1 else ""
-
             final_html = self._format_message(title, body, hashtags)
             target = await self.client.get_entity(TARGET_CHANNEL)
-
             media_files = [m.media for m in album_msgs if m.media]
-
             if media_files:
                 await self.client.send_file(target, media_files, caption=final_html, parse_mode="html")
             else:
                 await self.client.send_message(target, final_html, parse_mode="html")
-
             self.db.increment_stat("total_processed")
             if clean_text:
                 self.duplicate.add_message(clean_text, album_msgs[0].chat_id)
-
             await asyncio.sleep(random.randint(RANDOM_DELAY_MIN, RANDOM_DELAY_MAX))
-
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
-        except Exception:
-            pass
+        except Exception as e:
+            print("[Album] ERROR: " + str(e))
+            import traceback
+            traceback.print_exc()
 
     async def run(self):
+        print("[Run] Starting client...")
         await self.client.start()
+        me = await self.client.get_me()
+        print("[Run] Logged in as: " + str(me.first_name) + " (" + str(me.id) + ")")
         await self._resolve_source_channels()
+        self._setup_handlers()
+        print("=" * 50)
         print("🚀 ربات خبر فعال شد!")
         print("📤 کانال مقصد: " + TARGET_CHANNEL)
         print("📡 کانال‌های منبع: " + str(len(self._resolved_sources)))
+        print("=" * 50)
         self.running = True
-        await self.client.run_until_disconnected()
+        
+        while self.running:
+            try:
+                print("[Run] Waiting for updates...")
+                await self.client.run_until_disconnected()
+            except Exception as e:
+                print("[Run] Connection lost: " + str(e))
+            if self.running:
+                print("[Run] Reconnecting in 5s...")
+                await asyncio.sleep(5)
+                try:
+                    if not self.client.is_connected():
+                        await self.client.connect()
+                        print("[Run] Reconnected!")
+                except Exception as e2:
+                    print("[Run] Reconnect failed: " + str(e2))
+                    await asyncio.sleep(10)
 
     async def stop(self):
         self.running = False
